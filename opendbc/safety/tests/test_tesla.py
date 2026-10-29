@@ -15,6 +15,34 @@ from opendbc.safety.tests.common import MAX_WRONG_COUNTERS, away_round, round_sp
 MSG_DAS_steeringControl = 0x488
 MSG_APS_eacMonitor = 0x27d
 MSG_DAS_Control = 0x2b9
+MSG_DAS_bodyControls = 0x3E9
+
+# TurnPilot's commanded turn signal: the measured idle stock DAS_bodyControls (2025 HW4 Model 3, src 2)
+BODY_IDLE = bytes.fromhex("00880220000010a6")
+BODY_NONE, BODY_LEFT, BODY_RIGHT, BODY_CANCEL = 0, 1, 2, 3
+BODY_ON_REASONS = (0, 8, 9)
+BODY_CANCEL_REASON = 15
+# every bit the panda protects: bytes 0, 2, 3, 5; byte 1 bits 3-7; byte 4 bits 0, 6, 7; byte 6 bits 0-3
+BODY_PROTECTED_BITS = ([b for byte in (0, 2, 3, 5) for b in range(byte * 8, byte * 8 + 8)] +
+                       [8 + i for i in range(3, 8)] + [32, 38, 39] + [48 + i for i in range(4)])
+
+
+def body_checksum(dat) -> int:
+  return (0xE9 + 0x03 + sum(dat[:7])) & 0xFF
+
+
+def body_frame(stock, request=None, reason=None, counter=None, fix_checksum=True) -> bytearray:
+  """A DAS_bodyControls frame from a stock frame, with the request (8|3), reason (33|5) and counter (52|4) replaced."""
+  dat = bytearray(stock)
+  if request is not None:
+    dat[1] = (dat[1] & 0xF8) | request
+  if reason is not None:
+    dat[4] = (dat[4] & 0xC1) | (reason << 1)
+  if counter is not None:
+    dat[6] = (dat[6] & 0x0F) | ((counter & 0xF) << 4)
+  if fix_checksum:
+    dat[7] = body_checksum(dat)
+  return dat
 
 
 def round_angle(apply_angle, can_offset=0):
@@ -274,6 +302,20 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
     self.assertEqual(0, self.safety.safety_fwd_hook(2, lkas_msg_cam.addr))
     self.assertFalse(self._tx(no_lkas_msg))
 
+  def test_car_signals_off(self):
+    # without CAR_SIGNALS: no 0x3E9 TX, no 0x3E9 RX check, the stock frame always forwarded, and the gear changes nothing
+    self.assertEqual(9, self.safety.get_rx_checks_len())
+    stock = body_frame(BODY_IDLE, counter=0)
+    self.assertTrue(self._rx(common.make_msg(2, MSG_DAS_bodyControls, dat=bytes(stock))))
+    for gear in range(8):
+      self.assertTrue(self._rx(self.packer.make_can_msg_safety("DI_systemStatus", 0, {"DI_gear": gear})))
+      self.assertTrue(self._rx(self._vehicle_moving_msg(0.0)))
+      for request in range(4):
+        self.safety.set_controls_allowed(True)
+        dat = body_frame(stock, request=request, reason=8 if request else 0, counter=1)
+        self.assertFalse(self._tx(common.make_msg(0, MSG_DAS_bodyControls, dat=bytes(dat))))
+        self.assertEqual(0, self.safety.safety_fwd_hook(2, MSG_DAS_bodyControls))
+
   # Tesla uses get_max_angle_delta_vm and get_max_angle_vm for real lateral accel and jerk limits
   # TODO: integrate this into AngleSteeringSafetyTest
   def test_angle_cmd_when_enabled(self):
@@ -346,6 +388,420 @@ class TestTeslaSafetyBase(common.CarSafetyTest, common.AngleSteeringSafetyTest, 
 
         # Recover
         self.assertTrue(self._tx(self._angle_cmd_msg(0, True)))
+
+
+class TeslaCarSignalsMixin:
+  """TurnPilot's commanded turn signal (DESIGN section 3.7): the panda's rules for openpilot's DAS_bodyControls.
+
+  Mixed into a Tesla safety test class whose SAFETY_PARAM carries CAR_SIGNALS. Time is set explicitly with set_timer.
+  """
+  CHECK = False
+
+  def setUp(self):
+    super().setUp()
+    self.body_counter = 0
+    self.body_stock = bytes(BODY_IDLE)
+
+  def _body_rx(self, dat, bus=2):
+    return self._rx(common.make_msg(bus, MSG_DAS_bodyControls, dat=bytes(dat)))
+
+  def _stock(self, dat=None, counter=None):
+    """The DAS sends its next stock frame (counter +1) on bus 2; returns it."""
+    if counter is None:
+      counter = self.body_counter
+    self.body_counter = (counter + 1) % 16
+    stock = body_frame(BODY_IDLE if dat is None else dat, counter=counter)
+    self.assertTrue(self._body_rx(stock))
+    self.body_stock = bytes(stock)
+    return stock
+
+  def _body_tx(self, request, reason=None, stock=None, counter=None, dat=None):
+    stock = self.body_stock if stock is None else stock
+    if dat is None:
+      if reason is None:
+        reason = {BODY_LEFT: 8, BODY_RIGHT: 8, BODY_CANCEL: BODY_CANCEL_REASON}.get(request, (stock[4] >> 1) & 0x1F)
+      if counter is None:
+        counter = ((stock[6] >> 4) + 1) % 16
+      dat = body_frame(stock, request=request, reason=reason, counter=counter)
+    return self._tx(common.make_msg(0, MSG_DAS_bodyControls, dat=bytes(dat)))
+
+  def _gear_msg(self, gear: int, gas: float = 0):
+    return self.packer.make_can_msg_safety("DI_systemStatus", 0, {"DI_gear": gear, "DI_accelPedalPos": gas})
+
+  def _park(self, gear=1, moving=False):
+    self.assertTrue(self._rx(self._gear_msg(gear)))
+    self.assertTrue(self._rx(self._vehicle_moving_msg(1.0 if moving else 0.0)))
+
+  def _fwd_body(self):
+    return self.safety.safety_fwd_hook(2, MSG_DAS_bodyControls)
+
+  def _engaged(self):
+    self.safety.set_controls_allowed(True)
+
+  def _reset(self):
+    self._reset_safety_hooks()
+    self.safety.init_tests()
+
+  def test_car_signals_off(self):
+    # OVERRIDDEN: with CAR_SIGNALS the body message is the tenth RX check
+    self.assertEqual(10, self.safety.get_rx_checks_len())
+
+  # 1. freshness and storage of the stock frame
+  def test_body_no_stock_frame(self):
+    self._engaged()
+    for request in range(8):
+      self.assertFalse(self._body_tx(request, stock=BODY_IDLE))
+
+  def test_body_copy_fresh(self):
+    self._engaged()
+    self.safety.set_timer(1_000_000)
+    self._stock()
+    self.assertTrue(self._body_tx(BODY_LEFT))
+    self.safety.set_timer(1_000_000 + 249_999)
+    self.assertTrue(self._body_tx(BODY_LEFT))
+    self.safety.set_timer(1_000_000 + 250_000)
+    self.assertFalse(self._body_tx(BODY_LEFT))
+    self.safety.set_timer(1_000_000 + 251_000)
+    self.assertFalse(self._body_tx(BODY_LEFT))
+
+  def test_body_bad_checksum_not_stored(self):
+    self._engaged()
+    stock = body_frame(BODY_IDLE, counter=0)
+    stock[7] = (stock[7] + 1) & 0xFF
+    self.assertFalse(self._body_rx(stock))
+    self.assertFalse(self._body_tx(BODY_LEFT, stock=body_frame(stock)))
+    # and a later bad one doesn't replace a stored good one
+    self.safety.set_timer(10_000)
+    good = self._stock(counter=1)
+    bad = body_frame(BODY_IDLE, counter=2)
+    bad[0] = 0x01
+    bad[7] = (body_checksum(bad) + 1) & 0xFF
+    self.assertFalse(self._body_rx(bad))
+    self.assertFalse(self._body_tx(BODY_LEFT, stock=body_frame(bad)))
+    self.assertTrue(self._body_tx(BODY_LEFT, stock=good))
+
+  def test_body_bad_counter_not_stored(self):
+    self._engaged()
+    for _ in range(MAX_WRONG_COUNTERS + 1):
+      self._body_rx(body_frame(BODY_IDLE, counter=3))
+    stale = body_frame(BODY_IDLE, counter=3)
+    stale[0] = 0x04
+    stale = body_frame(stale)
+    self.assertFalse(self._body_rx(stale))
+    self.assertFalse(self._body_tx(BODY_LEFT, stock=stale))
+
+  # 2. nothing but the request, reason, counter and checksum may change
+  def test_body_protected_bits(self):
+    self.assertEqual(44, len(BODY_PROTECTED_BITS))
+    self._engaged()
+    for bit in BODY_PROTECTED_BITS:
+      with self.subTest(bit=bit):
+        stock = self._stock()
+        dat = body_frame(stock, request=BODY_LEFT, reason=8, counter=(stock[6] >> 4) + 1)
+        self.assertTrue(self._body_tx(None, dat=dat))
+        dat[bit // 8] ^= 1 << (bit % 8)
+        dat[7] = body_checksum(dat)
+        self.assertFalse(self._body_tx(None, dat=dat))
+
+  def test_body_other_stock_content_copied(self):
+    # high beams, wipers and every other stock bit ride through as the DAS sent them
+    self._engaged()
+    for bit in BODY_PROTECTED_BITS:
+      with self.subTest(bit=bit):
+        content = bytearray(BODY_IDLE)
+        content[bit // 8] ^= 1 << (bit % 8)
+        self._stock(dat=content)
+        self.assertTrue(self._body_tx(BODY_LEFT))
+        self.assertFalse(self._body_tx(BODY_LEFT, stock=BODY_IDLE))
+
+  # 3. counter and checksum
+  def test_body_counter(self):
+    self._engaged()
+    for stock_counter in range(16):
+      stock = self._stock(counter=stock_counter)
+      for counter in range(16):
+        with self.subTest(stock_counter=stock_counter, counter=counter):
+          self.assertEqual(counter == (stock_counter + 1) % 16, self._body_tx(BODY_LEFT, stock=stock, counter=counter))
+
+  def test_body_checksum(self):
+    self._engaged()
+    stock = self._stock()
+    dat = body_frame(stock, request=BODY_LEFT, reason=8, counter=(stock[6] >> 4) + 1)
+    for delta in (-1, 1):
+      bad = bytearray(dat)
+      bad[7] = (bad[7] + delta) & 0xFF
+      self.assertFalse(self._body_tx(None, dat=bad))
+    self.assertTrue(self._body_tx(None, dat=dat))
+
+  # 4. requests and reasons
+  def test_body_request_values(self):
+    self._engaged()
+    for request in range(4, 8):
+      self._stock()
+      for reason in range(32):
+        self.assertFalse(self._body_tx(request, reason=reason))
+
+  def test_body_on_reasons(self):
+    for request in (BODY_LEFT, BODY_RIGHT):
+      for reason in range(32):
+        with self.subTest(request=request, reason=reason):
+          self._stock()
+          self._engaged()
+          self.assertEqual(reason in BODY_ON_REASONS, self._body_tx(request, reason=reason))
+          self.safety.set_controls_allowed(False)
+          self._park(gear=4, moving=True)
+          self.assertFalse(self._body_tx(request, reason=reason))
+          self._park(gear=4, moving=False)
+          self.assertFalse(self._body_tx(request, reason=reason))
+
+  # 5. NONE ends ownership and needs it
+  def test_body_none_needs_ownership(self):
+    self._engaged()
+    self._stock()
+    self.assertFalse(self._body_tx(BODY_NONE))
+    self.assertTrue(self._body_tx(BODY_LEFT))
+    self._stock()
+    self.assertTrue(self._body_tx(BODY_NONE))
+    self._stock()
+    self.assertFalse(self._body_tx(BODY_NONE))
+
+  def test_body_none_after_ownership_timeout(self):
+    self._engaged()
+    self.safety.set_timer(1_000_000)
+    self._stock()
+    self.assertTrue(self._body_tx(BODY_LEFT))
+    self.safety.set_timer(1_751_000)
+    self._stock()
+    self.assertEqual(0, self._fwd_body())
+    self.assertTrue(self._body_tx(BODY_NONE))
+    self.assertFalse(self._body_tx(BODY_NONE))
+
+  def test_body_none_keeps_stock_reason(self):
+    self._engaged()
+    stock = self._stock(dat=body_frame(BODY_IDLE, reason=4))
+    self.assertTrue(self._body_tx(BODY_LEFT))
+    for reason in range(32):
+      self.assertEqual(reason == 4, self._body_tx(BODY_NONE, reason=reason, stock=stock))
+      if reason == 4:
+        self.assertTrue(self._body_tx(BODY_LEFT))
+
+  # 6. CANCEL is bounded to the request it ends
+  def test_body_cancel_needs_request(self):
+    self._engaged()
+    self._stock()
+    self.assertFalse(self._body_tx(BODY_CANCEL))
+    self.assertTrue(self._body_tx(BODY_LEFT))
+    self.assertTrue(self._body_tx(BODY_CANCEL))
+
+  def test_body_cancel_window(self):
+    for elapsed, ok in ((0, True), (2_999_999, True), (3_000_000, False), (3_001_000, False)):
+      with self.subTest(elapsed=elapsed):
+        self._reset()
+        self._engaged()
+        self.safety.set_timer(1_000_000)
+        self._stock()
+        self.assertTrue(self._body_tx(BODY_LEFT))
+        self.safety.set_timer(1_000_000 + elapsed)
+        self._stock()
+        self.assertEqual(ok, self._body_tx(BODY_CANCEL))
+
+  def test_body_cancel_count(self):
+    self._engaged()
+    self._stock()
+    self.assertTrue(self._body_tx(BODY_RIGHT))
+    self.assertTrue(self._body_tx(BODY_CANCEL))
+    self.assertTrue(self._body_tx(BODY_CANCEL))
+    self.assertFalse(self._body_tx(BODY_CANCEL))
+    # a new request resets the count
+    self.assertTrue(self._body_tx(BODY_RIGHT))
+    self.assertTrue(self._body_tx(BODY_CANCEL))
+    self.assertTrue(self._body_tx(BODY_CANCEL))
+    self.assertFalse(self._body_tx(BODY_CANCEL))
+    # a rejected request doesn't reset it
+    self.assertFalse(self._body_tx(BODY_RIGHT, reason=1))
+    self.assertFalse(self._body_tx(BODY_CANCEL))
+
+  def test_body_cancel_reason(self):
+    self._engaged()
+    self._stock()
+    self.assertTrue(self._body_tx(BODY_LEFT))
+    for reason in range(32):
+      self.assertEqual(reason == BODY_CANCEL_REASON, self._body_tx(BODY_CANCEL, reason=reason))
+      self.assertTrue(self._body_tx(BODY_LEFT))
+
+  def test_body_cancel_without_controls(self):
+    self._engaged()
+    self._stock()
+    self.assertTrue(self._body_tx(BODY_LEFT))
+    self.safety.set_controls_allowed(False)
+    self._park(gear=4, moving=True)
+    self.assertFalse(self._body_tx(BODY_LEFT))
+    self.assertTrue(self._body_tx(BODY_CANCEL))
+    self.assertTrue(self._body_tx(BODY_NONE))
+
+  # 7. the standstill allowances
+  def test_body_parked(self):
+    for gear in range(8):
+      for moving in (False, True):
+        for brake in (False, True):
+          with self.subTest(gear=gear, moving=moving, brake=brake):
+            self._reset()
+            self._stock()
+            self._park(gear=gear, moving=moving)
+            self.assertTrue(self._rx(self._user_brake_msg(brake)))
+            self.safety.set_controls_allowed(False)
+            parked = gear == 1 and not moving
+            stopped_in_d = self.CHECK and gear == 4 and not moving and brake
+            self.assertEqual(parked or stopped_in_d, self._body_tx(BODY_LEFT))
+            self.assertEqual(parked or stopped_in_d, self._body_tx(BODY_RIGHT))
+
+  def test_body_gear_bits(self):
+    # DI_gear is byte 2 bits 5-7; the other bits of byte 2 don't move it
+    for low in (0x00, 0x1F, 0x15, 0x0A):
+      for gear in range(8):
+        with self.subTest(low=low, gear=gear):
+          self._reset()
+          self._stock()
+          values = {"DI_gear": gear, "DI_systemState": low & 0x7, "DI_brakePedalState": (low >> 3) & 0x3}
+          self.assertTrue(self._rx(self.packer.make_can_msg_safety("DI_systemStatus", 0, values)))
+          self.assertTrue(self._rx(self._vehicle_moving_msg(0.0)))
+          self.assertEqual(gear == 1, self._body_tx(BODY_LEFT))
+
+  def test_body_park_then_drive(self):
+    self._stock()
+    self._park(gear=1)
+    self.assertTrue(self._body_tx(BODY_LEFT))
+    self._park(gear=4)
+    self.assertFalse(self._body_tx(BODY_LEFT))
+    self.assertTrue(self._body_tx(BODY_CANCEL))
+
+  # 8. forwarding
+  def test_body_forwarding(self):
+    self._engaged()
+    self.safety.set_timer(1_000_000)
+    self._stock()
+    self.assertEqual(0, self._fwd_body())
+    self.assertTrue(self._body_tx(BODY_LEFT))
+    self.assertEqual(-1, self._fwd_body())
+    self.safety.set_timer(1_500_000)
+    self._stock()
+    self.assertTrue(self._body_tx(BODY_CANCEL))
+    self.assertEqual(-1, self._fwd_body())
+    self.assertTrue(self._body_tx(BODY_NONE))
+    self.assertEqual(0, self._fwd_body())
+
+  def test_body_forwarding_timeout(self):
+    for elapsed, blocked in ((0, True), (749_999, True), (750_000, False), (751_000, False)):
+      with self.subTest(elapsed=elapsed):
+        self._reset()
+        self._engaged()
+        self.safety.set_timer(2_000_000)
+        self._stock()
+        self.assertTrue(self._body_tx(BODY_LEFT))
+        self.safety.set_timer(2_000_000 + elapsed)
+        self.assertEqual(-1 if blocked else 0, self._fwd_body())
+
+  def test_body_rejected_request_forwards(self):
+    self._stock()
+    self.safety.set_controls_allowed(False)
+    self._park(gear=4, moving=True)
+    self.assertFalse(self._body_tx(BODY_LEFT))
+    self.assertEqual(0, self._fwd_body())
+
+  def test_body_autopark_forwards(self):
+    self._engaged()
+    self._stock()
+    self.assertTrue(self._body_tx(BODY_LEFT))
+    self.assertEqual(-1, self._fwd_body())
+    self._rx(self._pcm_status_msg(False, self.autopark_states["ACTIVE"]))
+    self.assertEqual(0, self._fwd_body())
+    self.assertFalse(self._body_tx(BODY_LEFT))
+
+  def test_body_other_bus_forwarded(self):
+    self._engaged()
+    self._stock()
+    self.assertTrue(self._body_tx(BODY_LEFT))
+    self.assertEqual(2, self.safety.safety_fwd_hook(0, MSG_DAS_bodyControls))
+    self.assertEqual(-1, self._fwd_body())
+
+  # 9. observe-only: the body message never touches controls_allowed
+  def _feed_rx_checks(self, body=True):
+    self.assertTrue(self._rx(self._long_control_msg(0, bus=2)))
+    self.assertTrue(self._rx(self._angle_cmd_msg(0, False, increment_timer=False, bus=2)))
+    self.assertTrue(self._rx(self._speed_msg(0)))
+    self.assertTrue(self._rx(self._speed_msg_2(0)))
+    self.assertTrue(self._rx(self._angle_meas_msg(0)))
+    self.assertTrue(self._rx(self._user_gas_msg(0)))
+    self.assertTrue(self._rx(self._user_brake_msg(False)))
+    self.assertTrue(self._rx(self._pcm_status_msg(True)))
+    self.assertTrue(self._rx(self.packer.make_can_msg_safety("UI_warning", 0, {"buckleStatus": 1})))
+    if body:
+      self._stock()
+
+  def test_body_observe_only_missing(self):
+    self.assertEqual(10, self.safety.get_rx_checks_len())
+    self._feed_rx_checks(body=False)
+    self.safety.set_controls_allowed(True)
+    self.safety.set_timer(10_000_000)
+    self._feed_rx_checks(body=False)
+    self.safety.safety_tick()
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_safety_rx_checks_invalid())
+    self.assertTrue(self.safety.safety_config_valid())
+
+  def test_body_observe_only_lagging(self):
+    self._feed_rx_checks()
+    self.safety.set_controls_allowed(True)
+    self.safety.set_timer(10_000_000)
+    self._feed_rx_checks(body=False)
+    self.safety.safety_tick()
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_safety_rx_checks_invalid())
+
+  def test_body_observe_only_bad_checksum(self):
+    self._feed_rx_checks()
+    self.safety.set_controls_allowed(True)
+    bad = body_frame(BODY_IDLE, counter=self.body_counter)
+    bad[7] ^= 0xFF
+    self.assertFalse(self._body_rx(bad))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self._feed_rx_checks(body=False)
+    self.safety.safety_tick()
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_safety_rx_checks_invalid())
+
+  def test_body_observe_only_bad_counters(self):
+    self._feed_rx_checks()
+    self.safety.set_controls_allowed(True)
+    for _ in range(MAX_WRONG_COUNTERS + 2):
+      self._body_rx(body_frame(BODY_IDLE, counter=7))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self._feed_rx_checks(body=False)
+    self.safety.safety_tick()
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_safety_rx_checks_invalid())
+
+  def test_regular_check_still_disengages(self):
+    # beside the observe-only check, a regular one lagging still clears controls_allowed
+    self._feed_rx_checks()
+    self.safety.set_controls_allowed(True)
+    self.safety.set_timer(10_000_000)
+    self._feed_rx_checks(body=True)
+    self.safety.safety_tick()
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.safety.set_timer(13_000_000)
+    self._stock()
+    self.safety.safety_tick()
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_safety_rx_checks_invalid())
+
+  def test_regular_check_bad_checksum_still_disengages(self):
+    self._feed_rx_checks()
+    self.safety.set_controls_allowed(True)
+    msg = self._angle_cmd_msg(0, False, increment_timer=False, bus=2)
+    msg[0].data[3] = (msg[0].data[3] + 1) & 0xFF
+    self.assertFalse(self._rx(msg))
+    self.assertFalse(self.safety.get_controls_allowed())
 
 
 class TestTeslaStockSafety(TestTeslaSafetyBase):
@@ -429,6 +885,30 @@ class TestTeslaLongitudinalSafety(TestTeslaSafetyBase):
     self.assertFalse(self._tx(self._long_control_msg(set_speed=10, accel_limits=(-1.1, -0.6))))
     self.assertFalse(self._tx(self._long_control_msg(set_speed=0, accel_limits=(-0.6, -1.1))))
     self.assertFalse(self._tx(self._long_control_msg(set_speed=0, accel_limits=(-0.1, -0.1))))
+
+
+class TestTeslaCarSignalsSafety(TeslaCarSignalsMixin, TestTeslaStockSafety):
+  SAFETY_PARAM = TeslaSafetyFlags.CAR_SIGNALS
+  TX_MSGS = TestTeslaStockSafety.TX_MSGS + [[MSG_DAS_bodyControls, 0]]
+
+
+class TestTeslaCarSignalsLongSafety(TeslaCarSignalsMixin, TestTeslaLongitudinalSafety):
+  SAFETY_PARAM = TeslaSafetyFlags.LONG_CONTROL | TeslaSafetyFlags.CAR_SIGNALS
+  TX_MSGS = TestTeslaLongitudinalSafety.TX_MSGS + [[MSG_DAS_bodyControls, 0]]
+
+
+class TestTeslaCarSignalsCheckSafety(TeslaCarSignalsMixin, TestTeslaStockSafety):
+  SAFETY_PARAM = TeslaSafetyFlags.CAR_SIGNALS | TeslaSafetyFlags.CAR_SIGNALS_CHECK
+  TX_MSGS = TestTeslaStockSafety.TX_MSGS + [[MSG_DAS_bodyControls, 0]]
+  CHECK = True
+
+
+class TestTeslaCarSignalsCheckAloneSafety(TestTeslaStockSafety):
+  # the check bit means nothing without CAR_SIGNALS: today's mode exactly
+  SAFETY_PARAM = TeslaSafetyFlags.CAR_SIGNALS_CHECK
+
+  def test_no_body_rx_check(self):
+    self.assertEqual(9, self.safety.get_rx_checks_len())
 
 
 class TestTeslaIgnition(common.SafetyTestBase):

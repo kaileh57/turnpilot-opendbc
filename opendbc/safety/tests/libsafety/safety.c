@@ -21,6 +21,10 @@ bool safety_config_valid() {
 
   for (int i = 0; i < current_safety_config.rx_checks_len; i++) {
     const RxStatus status = rx_status[i];
+    // an observe-only check never gates controls, so it doesn't gate a valid config either
+    if (current_safety_config.rx_checks[i].msg[status.index].observe_only) {
+      continue;
+    }
     bool valid = status.msg_seen && !status.lagging && status.valid_checksum && (status.wrong_counters < MAX_WRONG_COUNTERS) && status.valid_quality_flag;
     if (!valid) {
       // printf("i %d seen %d lagging %d valid checksum %d wrong counters %d valid quality flag %d\n", i, status.msg_seen, status.lagging, status.valid_checksum, status.wrong_counters, status.valid_quality_flag);
@@ -40,6 +44,14 @@ void set_alternative_experience(int mode){
 
 void set_relay_malfunction(bool c){
   relay_malfunction = c;
+}
+
+int get_rx_checks_len(void){
+  return current_safety_config.rx_checks_len;
+}
+
+bool get_safety_rx_checks_invalid(void){
+  return safety_rx_checks_invalid;
 }
 
 bool get_controls_allowed(void){

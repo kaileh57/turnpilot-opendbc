@@ -110,13 +110,21 @@ RxStatus rx_status[MAX_RX_CHECKS];  // dynamic state of current_safety_config.rx
 static void generic_rx_checks(void);
 static void stock_ecu_check(bool stock_ecu_detected);
 
+// an observe-only RX check is read by the mode alone: it never gates controls_allowed (see CanMsgCheck)
+static bool is_observe_only(int index) {
+  const RxStatus *status = &rx_status[index];
+  return current_safety_config.rx_checks[index].msg[status->index].observe_only;
+}
+
 static bool is_msg_valid(int index) {
   bool valid = true;
   if (index != -1) {
     const RxStatus *status = &rx_status[index];
     if (!status->valid_checksum || !status->valid_quality_flag || (status->wrong_counters >= MAX_WRONG_COUNTERS)) {
       valid = false;
-      controls_allowed = false;
+      if (!is_observe_only(index)) {
+        controls_allowed = false;
+      }
     }
   }
   return valid;
@@ -302,7 +310,8 @@ void safety_tick(void) {
 
     // enforce minimum frequency for safety-relevant messages
     bool frequency_invalid = frequency < 10U;
-    if (lagging || frequency_invalid || !is_msg_valid(i)) {
+    bool invalid = !is_msg_valid(i);
+    if (!is_observe_only(i) && (lagging || frequency_invalid || invalid)) {
       rx_checks_invalid = true;
       controls_allowed = false;
     }

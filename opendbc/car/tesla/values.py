@@ -110,6 +110,10 @@ class CarControllerParams:
 
 class TeslaSafetyFlags(IntFlag):
   LONG_CONTROL = 1
+  # TurnPilot: openpilot works the turn signal through DAS_bodyControls (0x3E9). Honoured only by a debug panda build
+  CAR_SIGNALS = 4
+  # with CAR_SIGNALS, on the one ignition the lamp check runs: requests also allowed stopped in D with the brake pressed
+  CAR_SIGNALS_CHECK = 8
 
   # deprecated flags
   DAS_STEERING_3_BIT_DEPRECATED = 2

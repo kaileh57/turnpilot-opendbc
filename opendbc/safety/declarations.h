@@ -188,6 +188,8 @@ typedef struct {
   const bool ignore_counter : 1;      // counter check is not performed when set to true
   const unsigned int max_counter : 8; // maximum value of the counter. 0 means that the counter check is skipped
   const bool ignore_quality_flag : 1; // true if quality flag check is skipped
+  const bool observe_only : 1;        // the mode only reads it: never clears controls_allowed or sets rx_checks_invalid,
+                                      // any frequency; the mode judges its freshness itself
 } CanMsgCheck;
 
 // dynamic state of an RX check, reset on safety mode init
