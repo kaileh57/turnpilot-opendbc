@@ -279,6 +279,21 @@ BO_ 659 DAS_settings: 8 XXX
  SG_ DAS_settingCounter : 52|4@1+ (1,0) [0|15] "" XXX
  SG_ DAS_settingChecksum : 56|8@1+ (1,0) [0|255] "" XXX
 
+BO_ 1001 DAS_bodyControls: 8 PARTY
+ SG_ DAS_headlightRequest : 0|2@1+ (1,0) [0|3] "" aps
+ SG_ DAS_hazardLightRequest : 2|2@1+ (1,0) [0|3] "" aps
+ SG_ DAS_wiperSpeed : 4|4@1+ (1,0) [0|15] "" aps
+ SG_ DAS_turnIndicatorRequest : 8|3@1+ (1,0) [0|4] "" aps
+ SG_ DAS_highLowBeamDecision : 11|2@1+ (1,0) [0|3] "" aps
+ SG_ DAS_heaterRequest : 13|2@1+ (1,0) [0|2] "" aps
+ SG_ DAS_highLowBeamOffReason : 15|3@1+ (1,0) [0|7] "" aps
+ SG_ DAS_forwardCamHeaterDutyCycle : 18|4@1+ (1,0) [0|15] "" aps
+ SG_ DAS_ahlbOverride : 24|1@1+ (1,0) [0|1] "" aps
+ SG_ DAS_overrideWiperSetting : 29|1@1+ (1,0) [0|1] "" aps
+ SG_ DAS_turnIndicatorRequestReason : 33|5@1+ (1,0) [0|24] "" aps
+ SG_ DAS_bodyControlsCounter : 52|4@1+ (1,0) [0|15] "" aps
+ SG_ DAS_bodyControlsChecksum : 56|8@1+ (1,0) [0|255] "" aps
+
 BO_ 785 UI_warning: 7 XXX
  SG_ buckleStatus : 13|1@0+ (1,0) [0|1] "" XXX
  SG_ scrollWheelPressed : 21|1@0+ (1,0) [0|1] "" XXX
@@ -352,6 +367,9 @@ CM_ BO_ 84 "Appears with the 3-bit DAS_steeringControlType firmware on all Autop
 CM_ SG_ 659 DAS_autosteerEnabled "1 if Autosteer or FSD is enabled, 0 otherwise";
 CM_ SG_ 1160 DAS_steeringControlType "Older firmware only used the top 2 bits (bits 7:6), and is not supported";
 CM_ BO_ 1161 "Sent by HW3/HW4 Autopilot computers only on firmware with the 3-bit DAS_steeringControlType (not by HW2.5)";
+CM_ BO_ 1001 "Firmware layout (2025.20 and later Model 3/Y VEH): turn request 8|3, reason 33|5. Bits 15-17 are the high beam off reason, not the request reason. On Main (87) EPS firmware the Autopilot computer sends it on party CAN at 2 Hz";
+CM_ SG_ 1001 DAS_ahlbOverride "adaptive high beam override; earlier DBCs called this bit DAS_autopilotActive";
+CM_ SG_ 1001 DAS_overrideWiperSetting "earlier DBCs called this bit DAS_accActive";
 CM_ SG_ 785 leftBlinkerOn "only describes stalk position if half pressed without auto-cancel blinkers. otherwise acts as expected";
 CM_ SG_ 785 rightBlinkerOn "only describes stalk position if half pressed without auto-cancel blinkers. otherwise acts as expected";
 CM_ SG_ 785 scrollWheelPressed "captures either scroll wheel left, right or down press";
@@ -478,6 +496,13 @@ VAL_ 659 DAS_fcwSensitivity 0 "early" 1 "medium" 2 "late" 3 "off";
 VAL_ 659 DAS_driverAccelerationMode 0 "chill" 1 "standard";
 VAL_ 785 buckleStatus 1 "LATCHED" 0 "UNLATCHED" ;
 VAL_ 785 anyDoorOpen 1 "OPEN" 0 "CLOSED" ;
+VAL_ 1001 DAS_headlightRequest 3 "DAS_HEADLIGHT_REQUEST_INVALID" 1 "DAS_HEADLIGHT_REQUEST_ON" 0 "DAS_HEADLIGHT_REQUEST_OFF";
+VAL_ 1001 DAS_hazardLightRequest 3 "DAS_REQUEST_HAZARDS_SNA" 2 "DAS_REQUEST_HAZARDS_UNUSED" 0 "DAS_REQUEST_HAZARDS_OFF" 1 "DAS_REQUEST_HAZARDS_ON";
+VAL_ 1001 DAS_turnIndicatorRequest 0 "DAS_TURN_INDICATOR_NONE" 1 "DAS_TURN_INDICATOR_LEFT" 2 "DAS_TURN_INDICATOR_RIGHT" 3 "DAS_TURN_INDICATOR_CANCEL" 4 "DAS_TURN_INDICATOR_DEFER";
+VAL_ 1001 DAS_highLowBeamDecision 2 "DAS_HIGH_BEAM_ON" 1 "DAS_HIGH_BEAM_OFF" 3 "DAS_HIGH_BEAM_SNA" 0 "DAS_HIGH_BEAM_UNDECIDED";
+VAL_ 1001 DAS_heaterRequest 0 "DAS_HEATER_SNA" 2 "DAS_HEATER_ON" 1 "DAS_HEATER_OFF";
+VAL_ 1001 DAS_highLowBeamOffReason 5 "HIGH_BEAM_OFF_REASON_SNA";
+VAL_ 1001 DAS_turnIndicatorRequestReason 0 "DAS_NONE" 1 "DAS_ACTIVE_NAV_LANE_CHANGE" 2 "DAS_ACTIVE_SPEED_LANE_CHANGE" 3 "DAS_ACTIVE_FORK" 4 "DAS_CANCEL_LANE_CHANGE" 5 "DAS_CANCEL_FORK" 6 "DAS_ACTIVE_MERGE" 7 "DAS_CANCEL_MERGE" 8 "DAS_ACTIVE_COMMANDED_LANE_CHANGE" 9 "DAS_ACTIVE_INTERSECTION" 10 "DAS_CANCEL_INTERSECTION" 15 "DAS_CANCEL_MANUAL_BLINKER";
 VAL_ 785 leftBlinkerBlinking 0 "off" 1 "blinking, off" 2 "blinking, on";
 VAL_ 785 rightBlinkerBlinking 0 "off" 1 "blinking, off" 2 "blinking, on";
 VAL_ 923 DAS_autoLaneChangeState 5 "ALC_UNAVAILABLE_VEHICLE_SPEED" 17 "ALC_ABORT_POOR_VIEW_RANGE" 23 "ALC_BLOCKED_VEH_TTC_AND_USS_L" 0 "ALC_UNAVAILABLE_DISABLED" 26 "ALC_BLOCKED_LANE_TYPE_L" 29 "ALC_ABORT_TIMEOUT" 9 "ALC_IN_PROGRESS_L" 4 "ALC_UNAVAILABLE_EXITING_HIGHWAY" 22 "ALC_BLOCKED_VEH_TTC_L" 12 "ALC_WAITING_FOR_SIDE_OBST_TO_PASS_R" 18 "ALC_ABORT_LC_HEALTH_BAD" 28 "ALC_WAITING_HANDS_ON" 8 "ALC_AVAILABLE_BOTH" 11 "ALC_WAITING_FOR_SIDE_OBST_TO_PASS_L" 3 "ALC_UNAVAILABLE_TP_FOLLOW" 2 "ALC_UNAVAILABLE_SONICS_INVALID" 21 "ALC_UNAVAILABLE_SOLID_LANE_LINE" 24 "ALC_BLOCKED_VEH_TTC_R" 1 "ALC_UNAVAILABLE_NO_LANES" 25 "ALC_BLOCKED_VEH_TTC_AND_USS_R" 30 "ALC_ABORT_MISSION_PLAN_INVALID" 27 "ALC_BLOCKED_LANE_TYPE_R" 19 "ALC_ABORT_BLINKER_TURNED_OFF" 31 "ALC_SNA" 13 "ALC_WAITING_FOR_FWD_OBST_TO_PASS_L" 16 "ALC_ABORT_SIDE_OBSTACLE_PRESENT_R" 6 "ALC_AVAILABLE_ONLY_L" 20 "ALC_ABORT_OTHER_REASON" 15 "ALC_ABORT_SIDE_OBSTACLE_PRESENT_L" 7 "ALC_AVAILABLE_ONLY_R" 14 "ALC_WAITING_FOR_FWD_OBST_TO_PASS_R" 10 "ALC_IN_PROGRESS_R" ;

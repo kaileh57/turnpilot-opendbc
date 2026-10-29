@@ -205,6 +205,10 @@ struct CarState {
   blockPcmEnable @60 :Bool;  # whether to allow PCM to enable this frame
   carNotReady @61 :Bool;  # car is transiently refusing engagement, used to prevent a fault if engaged
 
+  # TurnPilot (renumber at an upstream rebase): a port working its own turn signal (opendbc/car/car_signal.py).
+  # leftBlinker/rightBlinker never include a lamp it lit.
+  carSignal @62 :CarSignal;
+
   # cruise state
   cruiseState @10 :CruiseState;
 
@@ -228,6 +232,29 @@ struct CarState {
 
   fuelGauge @41 :Float32; # battery or fuel tank level from [0.0, 1.0]
   charging @43 :Bool;
+
+  struct CarSignal {
+    enum Status { off @0; waiting @1; ready @2; requesting @3; lit @4; releasing @5; failed @6; checking @7; verifying @8; }
+    enum Fault { none @0; noStockFrame @1; lampTimeout @2; lampLost @3; lampStuck @4; capped @5; wrongSide @6;
+                 recheckFailed @7; }
+    enum Check { idle @0; waiting @1; reason @2; release @3; left @4; right @5; pattern @6; driverPress @7; passed @8;
+                 failed @9; aborted @10; }
+    enum Block { none @0; otherSide @1; hazard @2; inherited @3; }
+    status @0 :Status;
+    left @1 :Bool;         # the side requested or being released
+    right @2 :Bool;
+    leftLamp @3 :Bool;     # UI_warning's lamp, unmasked
+    rightLamp @4 :Bool;
+    fault @5 :Fault;       # latched for the drive, with status failed
+    check @6 :Check;       # check mode, and the ignition re-check
+    checkWhy @7 :Text;     # the check's failure or stop, one line
+    block @8 :Block;       # what holds the port off a request
+    hazard @9 :Bool;       # both blinkers published true while a mask is on
+    stillOn @10 :Bool;     # a masked lamp lit past the release tail
+    leftOn @11 :Bool;      # UI_warning.leftBlinkerOn, raw
+    rightOn @12 :Bool;
+    rejected @13 :UInt32;  # our turn signal frames the panda refused this drive
+  }
 
   struct WheelSpeeds {
     # optional wheel speeds
