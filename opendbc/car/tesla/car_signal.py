@@ -378,8 +378,8 @@ class TeslaCarSignal:
       still = True
       if self.dark_start and self.release_kind in ('cancel', 'none', 'silent') and self.fault == 'none':
         self._set_fault('lampStuck', 'the lamp stayed on after the release', t, None)
-    for side in (LEFT, RIGHT):
-      if self.mask.mask[side] == 'inherited' and self.mask.lamp[side] and t - self.mask.start_t >= RELEASE_TAIL_S:
+    for side in (LEFT, RIGHT):  # an inherited lamp, or ours on the wrong side, still lit (rules 3 and 7)
+      if self.mask.mask[side] in ('inherited', 'wrong') and self.mask.lamp[side] and t - self.mask.since[side] >= RELEASE_TAIL_S:
         still = True
     self.still_on = still
 

@@ -233,4 +233,36 @@ class BodyModel:
     return set(self.cause[side])
 
 
-__all__ = ['BodyModel', 'STOCK_IDLE', 'BODY_CONTROLS_ADDR', 'LEFT', 'RIGHT', 'NONE', 'SEMANTICS']
+class WrongSideHoldBody(BodyModel):
+  """A body that lights the side opposite the request (the wrong side, which a lamp check passed on a good day can still
+  meet now and then) and is slow to put it out: latched until a NONE puts it out none_delay later, or (none_delay None)
+  NONE ignored, the request dropped NONE_IGNORED_HOLD_S after its last frame. Its lamp outlasts the port's mask on the
+  requested side, which never lit."""
+
+  def __init__(self, none_delay: float | None = None, **kw):
+    super().__init__(semantics='noneIgnored', **kw)
+    self.none_delay = none_delay
+    self.none_off_t: float | None = None
+
+  def receive(self, dat: bytes, t: float) -> None:
+    request, _ = body_controls_request(dat)
+    if request == REQ_NONE and self.none_delay is not None and self.das_side != NONE:
+      self.frames_received.append((t, bytes(dat)))
+      if self.none_off_t is None:  # the first NONE (ours, or the stock frame forwarded after it) starts the delay
+        self.none_off_t = t + self.none_delay
+      return
+    super().receive(dat, t)
+
+  def _das_lit_sides(self, t: float) -> set:
+    if self.none_off_t is not None and t >= self.none_off_t:
+      self._das_off()
+      self.none_off_t = None
+    if self.das_side == NONE or t < self.das_on_t:
+      return set()
+    if self.none_delay is None and t - self.das_last_t > NONE_IGNORED_HOLD_S:
+      self.das_side = NONE
+      return set()
+    return {RIGHT if self.das_side == LEFT else LEFT}
+
+
+__all__ = ['BodyModel', 'WrongSideHoldBody', 'STOCK_IDLE', 'BODY_CONTROLS_ADDR', 'LEFT', 'RIGHT', 'NONE', 'SEMANTICS']

@@ -9,7 +9,7 @@ import unittest
 from opendbc.can import CANPacker
 from opendbc.car import gen_empty_fingerprint, structs
 from opendbc.car.car_signal import (NONE, LEFT, RIGHT, CarSignalsConfig, BlinkerMask, LAMP_ON_S, REQUEST_CAP_S)
-from opendbc.car.tesla.body_model import BodyModel, STOCK_IDLE
+from opendbc.car.tesla.body_model import BodyModel, STOCK_IDLE, WrongSideHoldBody
 from opendbc.car.tesla.car_signal import TeslaCarSignal, REQ_NONE, REQ_LEFT, REQ_RIGHT, REQ_CANCEL
 from opendbc.car.tesla.interface import CarInterface
 from opendbc.car.tesla.teslacan import (BODY_CONTROLS_ADDR, body_controls_checksum, body_controls_request,
@@ -209,6 +209,38 @@ class TestMask(unittest.TestCase):
     self.assertEqual('ours', m.mask[LEFT])  # one 0 frame unmasks nothing
     m.frame(False, False, 1.1)
     self.assertIsNone(m.mask[LEFT])
+
+  def test_wrong_side_lamp_held_till_off(self):
+    # a pending side that never lit lifts with ours
+    m = BlinkerMask()
+    m.frame(False, False, 0.)
+    m.claim(LEFT)
+    m.released(LEFT, 0.)
+    m.frame(False, False, 0.1)
+    m.frame(False, False, 0.2)
+    self.assertEqual((None, None), (m.mask[LEFT], m.mask[RIGHT]))
+    # rule 3: a lamp lit on the pending side is ours on the wrong side. Ours lifting (never lit) doesn't unmask it: it
+    # stays masked until it reads off STUCK_OFF_S, never the driver's blinker while it may still be ours
+    m.claim(LEFT)
+    m.frame(False, True, 0.3)
+    m.released(LEFT, 0.5)
+    t = 0.4
+    for _ in range(10):
+      m.frame(False, True, t)
+      t += 0.1
+    self.assertIsNone(m.mask[LEFT])
+    self.assertEqual('wrong', m.mask[RIGHT])
+    self.assertEqual((False, False), m.blinkers())
+    for lit in [False] * 6 + [True] * 3:  # a stalk touch's dark run, then lit again
+      m.frame(False, lit, t)
+      t += 0.1
+      self.assertEqual((False, False), m.blinkers())
+    for _ in range(11):
+      m.frame(False, False, t)
+      t += 0.1
+    self.assertIsNone(m.mask[RIGHT])
+    m.frame(False, True, t)
+    self.assertEqual((False, True), m.blinkers())  # lit after STUCK_OFF_S dark: the driver's
 
   def test_dark_phase_counts_as_lit(self):
     h = harness()
@@ -447,6 +479,32 @@ class TestPort(unittest.TestCase):
     self.assertNotIn(REQ_CANCEL, requests_sent(h))
     self.assertEqual(REQ_NONE, requests_sent(h)[-1])
     self.assertFalse(h.body.cause[RIGHT])
+
+  def test_wrong_side_lamp_outlasting_the_lift_never_reads_as_the_drivers(self):
+    # an intermittent wrong side, put out late: NONE ignored (the request dropped 2.5 s after its last frame), obeyed
+    # only after 1.2 s (inside the lamp check's own NONE_OFF_S), or after 5 s (past RELEASE_TAIL_S: still on, out loud)
+    for none_delay in (None, 1.2, 5.):
+      for seed in range(4):
+        with self.subTest(none_delay=none_delay, seed=seed):
+          body = WrongSideHoldBody(none_delay, rng=random.Random(seed), on_latency=0.2, glitch_rate=0., early_rate=0.)
+          h = harness(body=body, seed=seed)
+          h.run(1.)
+          h.want = LEFT
+          for _ in range(250):
+            h.step()
+            if h.port.fault != 'none':
+              break
+          h.want = NONE  # the intent drops it with the fault
+          still = False
+          for _ in range(800):
+            h.step()
+            still = still or h.port.still_on
+          self.assertEqual('wrongSide', h.port.fault)
+          self.assertEqual([], [(round(t, 2), left, right) for t, left, right in h.blinkers if left or right][:3])
+          self.assertEqual(none_delay == 5., still)
+          self.assertFalse(h.port.still_on)
+          self.assertFalse(h.port.mask.any_masked)  # lifted once the lamp read off STUCK_OFF_S
+          self.assertNotIn(REQ_CANCEL, requests_sent(h))
 
   def test_driver_other_side_in_first_second_survives(self):
     h = harness()
