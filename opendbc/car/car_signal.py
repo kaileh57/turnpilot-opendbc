@@ -32,6 +32,10 @@ STOCK_LOST_S = 1.0      # once ready, no stock frame this long is noStockFrame
 REQUEST_CAP_S = 300.    # any one continuous request
 NO_ECHO_S = 0.6         # with no echo of our request at all, LAMP_ON_S counts from the send plus this
 OFF_FRAMES = 2          # consecutive 0 frames that read a lamp off
+# a lamp still lit LAMP_OFF_S after its release, or lit when the port started, must read 0 this long before its mask
+# lifts: a stalk touch darkens a lamp 2 to 6 frames, and a latched lamp of ours coming back after one must never read as
+# a new driver's signal
+STUCK_OFF_S = 1.0
 HAZARD_FRAMES = 3       # consecutive both-lit frames before a hold is called hazards rather than the other side
 
 
@@ -60,6 +64,7 @@ class BlinkerMask:
     self.both_run = 0                      # consecutive frames with both lamps lit
     self.started = False
     self.release_ok = {LEFT: False, RIGHT: False}  # ours: the release is done sending, so the mask may lift
+    self.stuck = {LEFT: False, RIGHT: False}       # ours stayed lit past the release tail, or inherited: STUCK_OFF_S
     self.lift_after = {LEFT: 0., RIGHT: 0.}        # ours: not before this time (LAMP_OFF_S after the last CANCEL)
     self.start_t = 0.
 
@@ -74,6 +79,7 @@ class BlinkerMask:
     """The port decided to request side: both sides are masked from now (rules 1, 2)."""
     self.mask[side] = 'ours'
     self.release_ok[side] = False
+    self.stuck[side] = False
     self.lift_after[side] = 0.
     if self.mask[other(side)] is None:
       self.mask[other(side)] = 'pending'
@@ -88,6 +94,10 @@ class BlinkerMask:
     self.release_ok[side] = True
     self.lift_after[side] = lift_after
 
+  def mark_stuck(self, side: int) -> None:
+    """Our lamp is still lit past its release tail: from now on it lifts only after STUCK_OFF_S off."""
+    self.stuck[side] = True
+
   def frame(self, left: bool, right: bool, t: float) -> None:
     """A new lamp frame (UI_warning at 10 Hz)."""
     if not self.started:
@@ -97,6 +107,7 @@ class BlinkerMask:
       for side, lit in ((LEFT, left), (RIGHT, right)):
         if lit:
           self.mask[side] = 'inherited'
+          self.stuck[side] = True
     self.prev_lamp = dict(self.lamp)
     self.lamp = {LEFT: left, RIGHT: right}
     for side in SIDES:
@@ -109,13 +120,14 @@ class BlinkerMask:
     if self.hazard and all(self.zeros[s] >= OFF_FRAMES for s in SIDES):
       self.hazard = False
 
-    # rules 1 and 7: masks lift once the lamp reads off
+    # rules 1 and 7: masks lift once the lamp reads off (a stuck or inherited lamp: off for STUCK_OFF_S)
     for side in SIDES:
-      off = self.zeros[side] >= OFF_FRAMES
+      off_frames = OFF_FRAMES if not self.stuck[side] else max(OFF_FRAMES, int(round(STUCK_OFF_S / 0.1)) + 1)
+      off = self.zeros[side] >= off_frames
       if self.mask[side] == 'inherited' and off:
-        self.mask[side] = None
+        self.mask[side], self.stuck[side] = None, False
       elif self.mask[side] == 'ours' and off and self.release_ok[side] and t >= self.lift_after[side]:
-        self.mask[side] = None
+        self.mask[side], self.stuck[side] = None, False
         # rule 2: a pending other side stays masked for as long as ours does
         if self.mask[other(side)] == 'pending':
           self.mask[other(side)] = None

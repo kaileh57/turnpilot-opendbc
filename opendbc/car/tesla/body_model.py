@@ -220,8 +220,8 @@ class BodyModel:
       self.blink[side] = self.lamps[side].frame(on, glitch)
       on_bit[side] = self.stalk[side] if self.on_bits == 'driver' else bool(self.cause[side])
     if self.hazard_button:
-      # hazards blink both lamps in phase
-      self.blink[RIGHT] = self.blink[LEFT] if self.blink[LEFT] else self.blink[RIGHT]
+      # hazards blink both lamps in phase, over anything else (a touch or a glitch darkens both alike)
+      self.blink[RIGHT] = self.blink[LEFT]
     self.ui_counter = (self.ui_counter + 1) % 16
     dat = _ui_warning(self.blink[LEFT], self.blink[RIGHT], on_bit[LEFT], on_bit[RIGHT], self.ui_counter)
     return dat, self.blink[LEFT], self.blink[RIGHT], on_bit[LEFT], on_bit[RIGHT]

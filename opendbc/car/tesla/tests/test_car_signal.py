@@ -142,14 +142,15 @@ class TestInterface(unittest.TestCase):
     port = ci.CS.car_signal
     ci.update([(int(0.5e9), [])])  # the parsers register their messages on the first read
     port.stock_seen, port.stock_t, port.now = True, 0.95, 1.
-    # a lamp lit when the port starts is inherited: masked until it reads off twice
-    for i, (left, right) in enumerate([(2, 0), (2, 0), (0, 0), (0, 0), (2, 0)]):
+    # a lamp lit when the port starts is inherited: masked until it reads off for STUCK_OFF_S (a touch is 2 to 6 frames)
+    frames = [(2, 0), (2, 0)] + [(0, 0)] * 6 + [(2, 0)] + [(0, 0)] * 11 + [(2, 0)]
+    for i, (left, right) in enumerate(frames):
       t = 1 + i * 0.1
-      ui = packer.make_can_msg('UI_warning', 0, {'leftBlinkerBlinking': left, 'rightBlinkerBlinking': right, 'UI_warningCounter': i})[1]
+      ui = packer.make_can_msg('UI_warning', 0, {'leftBlinkerBlinking': left, 'rightBlinkerBlinking': right, 'UI_warningCounter': i % 16})[1]
       port.stock_t = t - 0.05
       cs = ci.update([(int(t * 1e9), [(0x311, ui, 0)])])
-      self.assertEqual(i == 4, cs.leftBlinker, i)
-      self.assertEqual('inherited' if i < 2 else 'none', str(cs.carSignal.block))
+      self.assertEqual(i == len(frames) - 1, cs.leftBlinker, i)
+      self.assertEqual('inherited' if left and i < 9 else 'none', str(cs.carSignal.block), i)
     self.assertEqual('ready', str(cs.carSignal.status))
     self.assertTrue(cs.carSignal.leftLamp)
 
@@ -442,7 +443,32 @@ class TestPort(unittest.TestCase):
     h.run(3.)
     self.assertEqual('wrongSide', h.port.fault)
     self.assertFalse(any(left or right for _, left, right in h.blinkers))
-    self.assertIn(REQ_CANCEL, requests_sent(h))
+    # NONE alone: a lamp on the other side may be the driver's, never erased by a CANCEL; the NONE puts ours out
+    self.assertNotIn(REQ_CANCEL, requests_sent(h))
+    self.assertEqual(REQ_NONE, requests_sent(h)[-1])
+    self.assertFalse(h.body.cause[RIGHT])
+
+  def test_driver_other_side_in_first_second_survives(self):
+    h = harness()
+    h.run(1.)
+    h.want = LEFT
+    while h.port.phase != 'lit':
+      h.step()
+    h.body.driver_stalk(RIGHT, True)
+    h.run(3.)
+    self.assertNotIn(REQ_CANCEL, requests_sent(h))
+    self.assertTrue(h.body.stalk[RIGHT])
+
+  def test_hazards_before_the_cancel_turn_it_into_none(self):
+    h = harness()
+    h.run(1.)
+    h.want = LEFT
+    h.run(3.)
+    h.want = NONE
+    h.step()  # the release is decided; the CANCEL waits for the next stock frame
+    h.body.hazards(True)
+    h.run(3.)
+    self.assertNotIn(REQ_CANCEL, requests_sent(h))
 
   def test_hazard_answer_body(self):
     h = harness(semantics='hazardAnswer')

@@ -82,6 +82,7 @@ class TeslaCarSignal:
     self.handover = False
     self.release_frames_done = False
     self.release_why = ''
+    self.last_request_t: float | None = None
 
     self.fault = 'none'
     self.fault_why = ''
@@ -204,6 +205,7 @@ class TeslaCarSignal:
     self.lit_frame_t = t
     self.cancel_t = None
     self.none_sent_t = None
+    self.last_request_t = None
     self.cancels = 0
     self.none_pending = False
     self.retry_open = False
@@ -244,16 +246,19 @@ class TeslaCarSignal:
     self.retry_open = False
     self.release_frames_done = self.release_kind == 'silent'
     if self.release_frames_done:
-      self.mask.released(self.side, t)
+      self._frames_done(t)
 
   def _next_frame(self, t: float) -> bytes | None:
     assert self.stock is not None
     if self.phase in ('requesting', 'lit'):
       if self.first_send_t is None:
         self.first_send_t = t
+      self.last_request_t = t
       return create_body_controls(self.stock, self.side, self.reason)
     if self.phase == 'release' and not self.release_frames_done:
       _, stock_reason = body_controls_request(self.stock)
+      if self.release_kind == 'cancel' and self._cancel_unsafe():
+        self.release_kind, self.retry_open, self.none_pending = 'none', False, True  # another lamp lit since: NONE alone
       if self.release_kind == 'cancel' and self.cancels == 0:
         self.cancels = 1
         self.cancel_t = t
@@ -272,6 +277,11 @@ class TeslaCarSignal:
         self.none_sent_t = t
         return create_body_controls(self.stock, REQ_NONE, stock_reason)
     return None
+
+  def _cancel_unsafe(self) -> bool:
+    """A lamp the CANCEL would erase lit since the release was decided: the other side (the driver's), or hazards."""
+    m = self.mask
+    return m.lamp[other(self.side)] or m.hazard or self.in_phase_run > 0
 
   def _release_progress(self, t: float) -> None:
     if self.phase != 'release':
@@ -294,6 +304,9 @@ class TeslaCarSignal:
   def _frames_done(self, t: float) -> None:
     self.release_frames_done = True
     lift_after = (self.cancel_t + LAMP_OFF_S) if self.cancel_t is not None else t
+    if self.last_request_t is not None:
+      # a lamp that answers our last request late (up to LAMP_ON_S, longer with no echo) still falls inside the mask
+      lift_after = max(lift_after, self.last_request_t + LAMP_ON_S + NO_ECHO_S)
     self.mask.released(self.side, lift_after)
 
   # ---------------------------------------------------------------- the lamps
@@ -321,7 +334,9 @@ class TeslaCarSignal:
       return
     if m.lamp[o]:
       if m.mask[o] == 'pending':
-        self._set_fault('wrongSide', 'the other side lit', t, 'auto')
+        # ours on the wrong side, or the driver's the other way in the request's first second: released with NONE alone
+        # (the check verified a NONE puts our lamp out), never a CANCEL that would erase the driver's signal
+        self._set_fault('wrongSide', 'the other side lit', t, 'none')
       else:
         self.driver_other = o
         self._release('none', t, why="the driver's other side")
@@ -357,6 +372,8 @@ class TeslaCarSignal:
       self._set_fault('capped', f'signal on {t - self.claim_t:.0f} s', t, 'auto')
     # rule 8: a masked lamp lit past the release tail is said out loud
     still = False
+    if self.phase == 'release' and self.mask.lamp[self.side] and t - self.release_t >= LAMP_OFF_S:
+      self.mask.mark_stuck(self.side)  # not out a second after its release: it lifts only after STUCK_OFF_S dark
     if self.phase == 'release' and self.mask.lamp[self.side] and t - self.release_t >= RELEASE_TAIL_S:
       still = True
       if self.dark_start and self.release_kind in ('cancel', 'none', 'silent') and self.fault == 'none':

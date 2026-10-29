@@ -38,6 +38,10 @@ class Failed(Exception):
   pass
 
 
+class NotTheReason(Failed):
+  """A step 1 result that another ON reason may fix: no lamp, a lamp that stopped, a lamp that didn't go off."""
+
+
 class _Script:
   """Steps a generator: each step sends the time in and gets (side, reason, release mode) out."""
   stage = 'idle'
@@ -110,7 +114,7 @@ class _Script:
       if p.frame_t != frame_t:
         frame_t = p.frame_t
         if other_dark and self.lamp(other(side)):
-          raise Failed("the other side lit")
+          raise Failed("the other side lit")  # ours on the wrong side, or a person: never another reason's to fix
         for s in touch_bits:
           if p.on_bit[s]:
             raise Abort("signal touched")
@@ -122,10 +126,10 @@ class _Script:
           last_lit = frame_t
           on_under = on_under or p.on_bit[side]
         elif lit_t is not None and frame_t - last_lit > gap_s + 0.1:
-          raise Failed(f"lamp stopped after {frame_t - lit_t:.1f} s")
+          raise NotTheReason(f"lamp stopped after {frame_t - lit_t:.1f} s")
       start = p.first_echo_t if p.first_echo_t is not None else p.first_send_t
       if lit_t is None and start is not None and t - start > on_s:
-        raise Failed("no lamp")
+        raise NotTheReason("no lamp")
       if p.first_send_t is not None and t - p.first_send_t >= hold_s:
         break
     latency = lit_t - (p.first_echo_t if p.first_echo_t is not None else p.first_send_t)
@@ -157,8 +161,9 @@ class _Script:
         elif self.lamp(side):
           off_t = None
       if ref is not None and off_t is None and t - ref > off_s:
-        raise Failed("lamp didn't go off" if release != 'silent' and release != 'none' else
-                     "car holds the signal after openpilot stops: not safe to command")
+        if release == 'cancel':
+          raise NotTheReason("lamp didn't go off")
+        raise Failed("car holds the signal after openpilot stops: not safe to command")
       if off_t is not None and p.phase == 'idle':
         break
       if t - t_rel > 8.:
@@ -308,7 +313,7 @@ class LampCheck(_Script):
       try:
         h = yield from self.hold(LEFT, reason, CHECK_HOLD_S, 'cancel')
         off = yield from self.release_off(LEFT, reason, 'cancel', CHECK_OFF_S, CHECK_QUIET_S)
-      except Failed as e:
+      except NotTheReason as e:
         tried.append(f"{reason}: {e}")
         yield from self.wait_idle(NONE, reason, 'cancel', limit_s=6.)
         yield from self.quiet(CHECK_QUIET_S)
