@@ -1,5 +1,7 @@
 from opendbc.car import Bus, get_safety_config, structs
+from opendbc.car.car_signal import CarSignalsConfig
 from opendbc.car.interfaces import CarInterfaceBase
+from opendbc.car.tesla.teslacan import BODY_CONTROLS_ADDR
 from opendbc.car.tesla.carcontroller import CarController
 from opendbc.car.tesla.carstate import CarState
 from opendbc.car.tesla.values import TeslaSafetyFlags, TeslaFlags, CANBUS, CAR, DBC
@@ -51,3 +53,36 @@ class CarInterface(CarInterfaceBase):
                        (not das_steering_3_bit and not docs))  # the car's software needs to be updated
 
     return ret
+
+  @staticmethod
+  def _car_signals(ret: structs.CarParams, fingerprint, config: CarSignalsConfig) -> structs.CarParams:
+    """TurnPilot's commanded turn signal (DAS_bodyControls). The panda honours CAR_SIGNALS only in a debug build."""
+    if fingerprint[CANBUS.autopilot_party].get(BODY_CONTROLS_ADDR) == 8:
+      ret.flags |= TeslaFlags.HAS_BODY_CONTROLS.value  # information only: at 2 Hz a fingerprint window can miss it
+    if config.mode not in ("check", "on"):
+      return ret
+    ret.flags |= TeslaFlags.CAR_SIGNALS.value
+    ret.safetyConfigs[0].safetyParam |= TeslaSafetyFlags.CAR_SIGNALS.value
+    if config.mode == "check":
+      ret.flags |= TeslaFlags.CAR_SIGNALS_CHECK.value
+      ret.safetyConfigs[0].safetyParam |= TeslaSafetyFlags.CAR_SIGNALS_CHECK.value
+      return ret
+    if config.on_reason == 9:
+      ret.flags |= TeslaFlags.CAR_SIGNALS_REASON_9.value
+    elif config.on_reason == 0:
+      ret.flags |= TeslaFlags.CAR_SIGNALS_REASON_0.value
+    if config.recheck:
+      ret.flags |= TeslaFlags.CAR_SIGNALS_RECHECK.value
+    if config.on_separates:
+      ret.flags |= TeslaFlags.CAR_SIGNALS_ON_SEPARATES.value
+    return ret
+
+  def update(self, can_packets):
+    # the stock DAS_bodyControls, our echoes and refusals are read raw, never through a CANParser, so the body
+    # message can never touch canValid
+    self.CS.car_signal.can(can_packets)
+    return super().update(can_packets)
+
+  def start_signal_check(self) -> None:
+    """The phone page's "Start check in Drive" (TurnPilotCarSignalsCheckNow), passed in by card."""
+    self.CS.car_signal.check_now = True

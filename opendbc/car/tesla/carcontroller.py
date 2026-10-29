@@ -2,6 +2,7 @@ import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import Bus
 from opendbc.car.lateral import apply_steer_angle_limits_vm
+from opendbc.car.car_signal import NONE, LEFT, RIGHT
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.tesla.teslacan import TeslaCAN
 from opendbc.car.tesla.values import CarControllerParams
@@ -57,6 +58,13 @@ class CarController(CarControllerBase):
       if CC.cruiseControl.cancel:
         cntr = (CS.das_control["DAS_controlCounter"] + 1) % 8
         can_sends.append(self.tesla_can.create_longitudinal_command(13, 0, cntr, CS.out.vEgo, False))
+
+    # TurnPilot's turn signal: the side CarControl asks for, through the port (car_signal.py), which sends nothing
+    # unless TurnPilotCarSignals put CAR_SIGNALS in CarParams, and in check mode only what the lamp check asks for
+    want = NONE
+    if CC.leftBlinker != CC.rightBlinker:
+      want = LEFT if CC.leftBlinker else RIGHT
+    can_sends.extend(CS.car_signal.control(want, CC.enabled, now_nanos))
 
     # TODO: HUD control
     new_actuators = actuators.as_builder()

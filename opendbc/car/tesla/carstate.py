@@ -3,6 +3,7 @@ from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
+from opendbc.car.tesla.car_signal import TeslaCarSignal
 from opendbc.car.tesla.values import DBC, CANBUS, GEAR_MAP, STEER_THRESHOLD, TeslaFlags
 
 class CarState(CarStateBase):
@@ -17,6 +18,10 @@ class CarState(CarStateBase):
 
     self.hands_on_level = 0
     self.das_control = None
+
+    # TurnPilot: the port working its own turn signal, shared with the CarController through this object
+    self.car_signal = TeslaCarSignal(CP)
+    self.ui_warning_nanos = 0
 
   def update_autopark_state(self, autopark_state: str, cruise_enabled: bool):
     autopark_now = autopark_state in ("ACTIVE", "COMPLETE", "SELFPARK_STARTED")
@@ -86,9 +91,17 @@ class CarState(CarStateBase):
     # Doors
     ret.doorOpen = cp_party.vl["UI_warning"]["anyDoorOpen"] == 1
 
-    # Blinkers
-    ret.leftBlinker = cp_party.vl["UI_warning"]["leftBlinkerBlinking"] in (1, 2)
-    ret.rightBlinker = cp_party.vl["UI_warning"]["rightBlinkerBlinking"] in (1, 2)
+    # Blinkers: the lamps, less any lamp our own turn signal lit (car_signal.py's mask; the lamps as-is with it off)
+    ui_warning = cp_party.vl["UI_warning"]
+    ui_nanos = cp_party.ts_nanos["UI_warning"]["leftBlinkerBlinking"]
+    new_ui = ui_nanos != self.ui_warning_nanos and ui_nanos > 0
+    self.ui_warning_nanos = ui_nanos
+    ret.leftBlinker, ret.rightBlinker = self.car_signal.lamps(new_ui, int(ui_warning["leftBlinkerBlinking"]),
+                                                              int(ui_warning["rightBlinkerBlinking"]),
+                                                              bool(ui_warning["leftBlinkerOn"]), bool(ui_warning["rightBlinkerOn"]),
+                                                              ui_nanos * 1e-9, standstill=ret.standstill, gear=ret.gearShifter,
+                                                              brake=ret.brakePressed)
+    self.car_signal.publish(ret)
 
     # Seatbelt
     ret.seatbeltUnlatched = cp_party.vl["UI_warning"]["buckleStatus"] != 1

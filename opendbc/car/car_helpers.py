@@ -1,8 +1,10 @@
 import os
 import time
+from collections.abc import Callable
 
 from opendbc.car import gen_empty_fingerprint
 from opendbc.car.can_definitions import CanRecvCallable, CanSendCallable
+from opendbc.car.car_signal import CarSignalsConfig
 from opendbc.car.carlog import carlog
 from opendbc.car.structs import CarParams, CarParamsT
 from opendbc.car.fingerprints import eliminate_incompatible_cars, all_legacy_fingerprint_cars
@@ -149,15 +151,20 @@ def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_mu
 
 
 def get_car(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_multiplexing: ObdCallback, alpha_long_allowed: bool,
-            is_release: bool, cached_params: CarParamsT | None = None):
+            is_release: bool, cached_params: CarParamsT | None = None,
+            car_signals: Callable[[str, list[CarParams.CarFw]], CarSignalsConfig] | None = None):
   candidate, fingerprints, vin, car_fw, source, exact_match = fingerprint(can_recv, can_send, set_obd_multiplexing, cached_params)
 
   if candidate is None:
     carlog.error({"event": "car doesn't match any fingerprints", "fingerprints": repr(fingerprints)})
     candidate = "MOCK"
 
+  # TurnPilot: whether this car works its own turn signal, resolved with the VIN and firmware in hand (car_signal.py)
+  signals_config = car_signals(vin, car_fw) if car_signals is not None else None
+
   CarInterface = interfaces[candidate]
-  CP: CarParams = CarInterface.get_params(candidate, fingerprints, car_fw, alpha_long_allowed, is_release, docs=False)
+  CP: CarParams = CarInterface.get_params(candidate, fingerprints, car_fw, alpha_long_allowed, is_release, docs=False,
+                                          car_signals=signals_config)
   CP.carVin = vin
   CP.carFw = car_fw
   CP.fingerprintSource = source

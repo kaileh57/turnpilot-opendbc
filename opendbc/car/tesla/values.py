@@ -122,6 +122,14 @@ class TeslaSafetyFlags(IntFlag):
 class TeslaFlags(IntFlag):
   LONG_CONTROL = 1
   MISSING_DAS_SETTINGS = 4
+  # TurnPilot's commanded turn signal (DAS_bodyControls 0x3E9), opendbc/car/car_signal.py
+  HAS_BODY_CONTROLS = 8          # 0x3E9 seen on bus 2 while fingerprinting (information only: at 2 Hz it can be missed)
+  CAR_SIGNALS = 16               # the port works the turn signal: mode check or on (TurnPilotCarSignals)
+  CAR_SIGNALS_CHECK = 32         # this ignition runs the lamp check, and nothing else
+  CAR_SIGNALS_REASON_9 = 64      # the verified ON reason is 9 (DAS_ACTIVE_INTERSECTION); default 8
+  CAR_SIGNALS_REASON_0 = 128     # the verified ON reason is 0 (DAS_NONE)
+  CAR_SIGNALS_RECHECK = 256      # the record passed in P: re-check the lamps in P at this ignition before signalling
+  CAR_SIGNALS_ON_SEPARATES = 512  # UI_warning's *BlinkerOn follows only the driver's stalk on this car
 
   # deprecated flags
   # old 2-bit FW is now dashcammed

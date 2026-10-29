@@ -11,6 +11,7 @@ from functools import cache
 from opendbc.car import DT_CTRL, apply_hysteresis, gen_empty_fingerprint, scale_rot_inertia_per_mass, scale_tire_stiffness_per_mass
 from opendbc.car import structs
 from opendbc.car.can_definitions import CanData, CanRecvCallable, CanSendCallable
+from opendbc.car.car_signal import CarSignalsConfig
 from opendbc.car.common.basedir import BASEDIR
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.common.simple_kalman import KF1D, get_kalman_gain
@@ -129,7 +130,7 @@ class CarInterfaceBase(ABC):
 
   @classmethod
   def get_params(cls, candidate: str, fingerprint: dict[int, dict[int, int]], car_fw: list[structs.CarParams.CarFw],
-                 alpha_long: bool, is_release: bool, docs: bool) -> structs.CarParams:
+                 alpha_long: bool, is_release: bool, docs: bool, car_signals: CarSignalsConfig | None = None) -> structs.CarParams:
     ret = CarInterfaceBase.get_std_params(candidate)
 
     platform = PLATFORMS[candidate]
@@ -142,6 +143,7 @@ class CarInterfaceBase(ABC):
     ret.flags |= int(platform.config.flags)
 
     ret = cls._get_params(ret, candidate, fingerprint, car_fw, alpha_long, is_release, docs)
+    ret = cls._car_signals(ret, fingerprint, car_signals if car_signals is not None else CarSignalsConfig())
 
     # Set params dependent on values set by the car interface
     ret.rotationalInertiaPerMass = scale_rot_inertia_per_mass(ret.wheelbase)
@@ -155,6 +157,14 @@ class CarInterfaceBase(ABC):
   def _get_params(ret: structs.CarParams, candidate, fingerprint: dict[int, dict[int, int]],
                   car_fw: list[structs.CarParams.CarFw], alpha_long: bool, is_release: bool, docs: bool) -> structs.CarParams:
     raise NotImplementedError
+
+  @staticmethod
+  def _car_signals(ret: structs.CarParams, fingerprint: dict[int, dict[int, int]], config: CarSignalsConfig) -> structs.CarParams:
+    """TurnPilot: a port that can work its car's own turn signal sets its flags from config (car_signal.py)."""
+    return ret
+
+  def start_signal_check(self) -> None:
+    """TurnPilot: the phone page asked to start the turn signal check in Drive; only a car-signal port acts on it."""
 
   @staticmethod
   def init(CP: structs.CarParams, can_recv: CanRecvCallable, can_send: CanSendCallable):
